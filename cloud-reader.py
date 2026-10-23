@@ -189,6 +189,7 @@ def prepare(source, destination, poppler=None):
 
 
 import time
+import tempfile
 import urllib.request
 import urllib.error
 ORIGIN = 'https://zhiyu.ruiqiuguge.chatgpt.site'
@@ -238,6 +239,19 @@ def ocr(raw, directory):
             'pages': value['pages'], 'tiles': value['chunks'], 'truncated': False}}
 
 if __name__ == '__main__':
+    # Synthetic fixture stays in the runner's temporary directory, never the DB.
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    with tempfile.TemporaryDirectory(prefix='zhiyu-ocr-selftest-') as directory:
+        image = Image.new('RGB', (1000, 180), 'white')
+        font = ImageFont.truetype('DejaVuSans.ttf', 48)
+        ImageDraw.Draw(image).text((30, 40), '2026-10-23 15:00', font=font, fill='black')
+        data = io.BytesIO()
+        image.save(data, format='PNG')
+        result = ocr(data.getvalue(), directory)
+        if '2026' not in result['text'] or '15:00' not in result['text']:
+            raise RuntimeError('ocr_selftest_failed')
+        print(json.dumps({'ocr_selftest': 'passed', 'models_called': 0}), flush=True)
     try:
         call('status')
     except urllib.error.HTTPError as error:

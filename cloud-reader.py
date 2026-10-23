@@ -190,6 +190,7 @@ def prepare(source, destination, poppler=None):
 
 import time
 import urllib.request
+import urllib.error
 ORIGIN = 'https://zhiyu.ruiqiuguge.chatgpt.site'
 TOKEN = os.environ.get('ZHIYU_COLLECT_TOKEN')
 if not TOKEN:
@@ -237,6 +238,13 @@ def ocr(raw, directory):
             'pages': value['pages'], 'tiles': value['chunks'], 'truncated': False}}
 
 if __name__ == '__main__':
+    try:
+        call('status')
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        print(json.dumps({'status': 'awaiting_site_deployment', 'processed': 0}), flush=True)
+        raise SystemExit(0)
     started = time.monotonic()
     for _ in range(32):
         if time.monotonic() - started > 780:

@@ -190,29 +190,44 @@ def prepare(source, destination, poppler=None):
 
 import time
 import tempfile
-import urllib.request
-import urllib.error
 ORIGIN = 'https://zhiyu.ruiqiuguge.chatgpt.site'
 TOKEN = os.environ.get('ZHIYU_COLLECT_TOKEN')
 if not TOKEN:
     raise RuntimeError('missing_collector_configuration')
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+class HTTPFailure(RuntimeError):
+    def __init__(self, status, code):
+        self.status = status
+        self.code = code
+        super().__init__('cloud_http_' + str(status) + '_' + code)
 
-opener = urllib.request.build_opener(NoRedirect)
+# Use the same authenticated Node HTTP client as the scheduled collector.
+# Credentials stay in the inherited environment; job bodies travel over stdin.
+HTTP_CLIENT = r"""
+let input='';for await(const part of process.stdin){input+=part;if(input.length>1500000)throw Error('request_too_large')}
+const {action,body,asset}=JSON.parse(input);if(!['status','text','claim','asset','result'].includes(action))throw Error('outside_scope');
+const r=await fetch('https://zhiyu.ruiqiuguge.chatgpt.site/api/service/cloud-reading/'+action,{method:'POST',redirect:'error',headers:{authorization:'Bearer '+process.env.ZHIYU_COLLECT_TOKEN,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(110000)});
+const limit=asset?8000000:1000000,chunks=[];let size=0;for await(const chunk of r.body){size+=chunk.length;if(size>limit)throw Error('body_too_large');chunks.push(chunk)}
+process.stdout.write(JSON.stringify({status:r.status,base64:Buffer.concat(chunks).toString('base64')}));
+"""
 
 def call(action, body=None, asset=False):
-    request = urllib.request.Request(ORIGIN + '/api/service/cloud-reading/' + action,
-        data=json.dumps(body or {}).encode(), method='POST',
-        headers={'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'})
-    with opener.open(request, timeout=110) as response:
-        data = response.read(8_000_001 if asset else 1_000_001)
-        if len(data) > (8_000_000 if asset else 1_000_000):
-            raise ValueError('body_too_large')
-        value = data if asset else json.loads(data)
-        return value if asset else value.get('data', value)
+    import base64
+    result = subprocess.run(['node', '--input-type=module', '-e', HTTP_CLIENT],
+        input=json.dumps({'action': action, 'body': body or {}, 'asset': asset}),
+        capture_output=True, text=True, encoding='utf-8', timeout=120, check=True)
+    response = json.loads(result.stdout)
+    data = base64.b64decode(response['base64'], validate=True)
+    if len(data) > (8_000_000 if asset else 1_000_000):
+        raise ValueError('body_too_large')
+    if response['status'] != 200:
+        try:
+            code = str(json.loads(data).get('error', {}).get('code', 'request_failed'))[:80]
+        except ValueError:
+            code = 'non_json_response'
+        raise HTTPFailure(response['status'], code)
+    value = data if asset else json.loads(data)
+    return value if asset else value.get('data', value)
 
 def ocr(raw, directory):
     source = Path(directory) / 'asset.bin'
@@ -254,8 +269,8 @@ if __name__ == '__main__':
         print(json.dumps({'ocr_selftest': 'passed', 'models_called': 0}), flush=True)
     try:
         call('status')
-    except urllib.error.HTTPError as error:
-        if error.code != 404:
+    except HTTPFailure as error:
+        if error.status != 404 and error.code != 'cloud_read_only':
             raise
         print(json.dumps({'status': 'awaiting_site_deployment', 'processed': 0}), flush=True)
         raise SystemExit(0)
